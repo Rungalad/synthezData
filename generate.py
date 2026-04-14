@@ -219,36 +219,146 @@ def unit_full_name(u: Unit) -> str:
     return " / ".join(reversed(names))
 
 
-def build_agile_teams(rng: random.Random, leaves: list[Unit]) -> list[AgileTeam]:
-    """Agile layer — only for a subset of IT leaves (~70%)."""
+TRIBE_THEMES_IT = [
+    "Data Platform", "ML & AI", "Customer Experience", "Core Banking",
+    "DevSecOps", "Cloud Foundation", "Mobile Engineering", "Web Engineering",
+    "API Gateway", "Cybersecurity", "Data Governance", "Analytics & BI",
+    "Digital Identity", "Payments Tech", "Risk Engine", "Fraud Detection",
+]
+TRIBE_THEMES_BANK = [
+    "Retail Lending", "Mortgage", "Premium Clients", "SME Banking",
+    "Corporate Sales", "Treasury", "Investment Solutions", "Cards",
+    "Acquiring", "Loyalty", "Claims", "Collection", "Compliance Ops",
+    "Back-Office Operations", "Financial Reporting",
+]
+TRIBE_ADJECTIVES = [
+    "Next", "Smart", "Digital", "Unified", "Agile", "One", "Prime",
+    "Express", "Atlas", "Orion", "Phoenix", "Vector", "Quantum",
+    "Nova", "Fusion", "Horizon", "Compass", "Beacon",
+]
+CLUSTER_THEMES_IT = [
+    "Ingestion", "Streaming", "Feature Store", "MLOps", "Model Serving",
+    "Search", "Personalization", "Recommender", "CI/CD", "Observability",
+    "Identity", "Access Management", "Data Lake", "Data Warehouse",
+    "Frontend", "Backend", "Mobile iOS", "Mobile Android", "Integration Bus",
+]
+CLUSTER_THEMES_BANK = [
+    "Онбординг", "Скоринг", "Сопровождение сделок", "Кросс-продажи",
+    "Досрочное погашение", "Верификация", "Мониторинг портфеля",
+    "Реструктуризация", "Взыскание", "Открытие счетов",
+    "Выпуск карт", "Комиссии и тарифы", "Претензионная работа",
+    "Отчётность ЦБ", "Антифрод",
+]
+TEAM_NICKS = [
+    "Ananas", "Banana", "Mango", "Kiwi", "Papaya", "Peach", "Lychee",
+    "Durian", "Apple", "Cherry", "Grape", "Lemon", "Melon",
+    "Falcon", "Hawk", "Eagle", "Raven", "Sparrow", "Owl",
+    "Neptune", "Jupiter", "Saturn", "Mercury", "Venus", "Mars", "Pluto",
+    "Alpha", "Beta", "Gamma", "Delta", "Sigma", "Omega", "Zeta", "Theta",
+    "Nord", "Sud", "Est", "West", "Core", "Edge", "Prime", "Zero", "One",
+]
+TEAM_SUFFIXES_IT = [
+    "Engineering", "Platform", "Experience", "Analytics", "Automation",
+    "Reliability", "Security", "Insights", "Delivery", "Innovation",
+]
+TEAM_SUFFIXES_BANK = [
+    "Продаж", "Поддержки", "Контроля", "Обслуживания", "Аналитики",
+    "Развития", "Взаимодействия", "Сопровождения", "Мониторинга",
+]
+
+
+def _make_tribe_name(rng: random.Random, is_it: bool, idx: int) -> str:
+    themes = TRIBE_THEMES_IT if is_it else TRIBE_THEMES_BANK
+    style = rng.randint(0, 3)
+    theme = rng.choice(themes)
+    adj = rng.choice(TRIBE_ADJECTIVES)
+    if style == 0:
+        return f"Трайб «{theme}»"
+    if style == 1:
+        return f"Трайб {adj} {theme}"
+    if style == 2:
+        return f"Tribe {theme} {idx % 50}"
+    return f"Трайб {theme} {rng.choice(['RU', 'EU', 'Global', 'Digital', 'Core'])}"
+
+
+def _make_cluster_name(rng: random.Random, is_it: bool, idx: int) -> str:
+    themes = CLUSTER_THEMES_IT if is_it else CLUSTER_THEMES_BANK
+    style = rng.randint(0, 2)
+    theme = rng.choice(themes)
+    if style == 0:
+        return f"Кластер {theme}"
+    if style == 1:
+        return f"Кластер {theme} {rng.choice(TRIBE_ADJECTIVES)}"
+    return f"Кластер {theme} {idx % 40}"
+
+
+def _make_team_name(rng: random.Random, is_it: bool, leaf: "Unit") -> str:
+    style = rng.randint(0, 4)
+    nick = rng.choice(TEAM_NICKS)
+    suffix_pool = TEAM_SUFFIXES_IT if is_it else TEAM_SUFFIXES_BANK
+    suffix = rng.choice(suffix_pool)
+    if style == 0:
+        return f"Команда {nick}"
+    if style == 1:
+        return f"Команда {nick} {suffix}"
+    if style == 2:
+        return f"Team {nick} {rng.randint(1, 99)}"
+    if style == 3:
+        # use leaf name tail for traceability
+        short = leaf.name.split()[-1] if leaf.name else nick
+        return f"Команда {nick}-{short}"
+    return f"Команда {nick} {rng.choice(['North', 'South', 'East', 'West', 'Core', 'Edge'])}"
+
+
+def build_agile_teams(
+    rng: random.Random,
+    leaves: list[Unit],
+    coverage: float = 0.80,
+) -> list[AgileTeam]:
+    """Assign agile tribe/cluster/team to ~`coverage` of ALL leaves.
+
+    Both IT and non-IT leaves get agile structure; names are themed by
+    IT/bank flavour. The remaining ~(1-coverage) of leaves stay without
+    agile (tribe/cluster/team fields will be NULL for those employees).
+    """
     teams: list[AgileTeam] = []
     tribe_counter = 5000
     cluster_counter = 6000
     team_counter = 7000
-    # group IT leaves by L2 parent → tribe
-    it_leaves = [u for u in leaves if u.is_it]
-    by_l2: dict[int, list[Unit]] = {}
-    for lf in it_leaves:
+
+    # 1. decide which leaves are covered, preserving weighted headcount share
+    rng.shuffle(leaves)
+    total_w = sum(lf.size_weight for lf in leaves)
+    target_w = coverage * total_w
+    covered_set: set[int] = set()
+    acc = 0.0
+    for lf in leaves:
+        if acc >= target_w: break
+        covered_set.add(lf.uid); acc += lf.size_weight
+    covered = [lf for lf in leaves if lf.uid in covered_set]
+
+    # 2. group covered leaves by (is_it, L2 parent) → one tribe per group
+    by_l2: dict[tuple[bool, int], list[Unit]] = {}
+    for lf in covered:
         l2 = lf.parent.parent  # type: ignore[union-attr]
-        by_l2.setdefault(l2.uid, []).append(lf)  # type: ignore[union-attr]
+        by_l2.setdefault((lf.is_it, l2.uid), []).append(lf)  # type: ignore[union-attr]
 
     leaf_to_team: dict[int, AgileTeam] = {}
-    for l2_uid, lfs in by_l2.items():
+    for (is_it, _l2_uid), lfs in by_l2.items():
         tribe_counter += 1
-        tribe_name = f"Трайб {rng.choice(['Ananas', 'Banana', 'Mango', 'Kiwi', 'Papaya', 'Peach'])} {tribe_counter % 100}"
-        # clusters: group lfs into chunks
+        tribe_name = _make_tribe_name(rng, is_it, tribe_counter)
         rng.shuffle(lfs)
-        chunk = max(2, len(lfs) // max(1, rng.randint(1, 3)))
+        # 1-3 clusters per tribe
+        n_clusters = max(1, min(len(lfs), rng.randint(1, 3)))
+        chunk = max(1, len(lfs) // n_clusters)
         for i in range(0, len(lfs), chunk):
             cluster_counter += 1
-            cluster_name = f"Кластер {rng.choice(['Alpha', 'Beta', 'Gamma', 'Delta'])} {cluster_counter % 100}"
+            cluster_name = _make_cluster_name(rng, is_it, cluster_counter)
             for lf in lfs[i:i + chunk]:
                 team_counter += 1
-                team_name = f"Команда {lf.name}"
                 t = AgileTeam(tribe_name, tribe_counter, cluster_name, cluster_counter,
-                              team_name, team_counter, is_it=True)
+                              _make_team_name(rng, is_it, lf), team_counter, is_it=is_it)
                 teams.append(t); leaf_to_team[lf.uid] = t
-    # attach as attribute for quick lookup
     for lf in leaves:
         lf.agile = leaf_to_team.get(lf.uid)  # type: ignore[attr-defined]
     return teams
